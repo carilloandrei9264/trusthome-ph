@@ -103,7 +103,12 @@ def rename_cloudinary_asset(asset: dict[str, str], cloud_name: str, api_key: str
         raise RuntimeError(f"Cloudinary asset conversion failed with HTTP {response.status_code}.")
 
 
-def migrate_verification_documents(db, apply: bool = False, asset_migrator=None) -> dict[str, int]:
+def migrate_verification_documents(
+    db,
+    apply: bool = False,
+    asset_migrator=None,
+    mark_safe_only: bool = False,
+) -> dict[str, int]:
     listings = db.collection("listings")
     private_listings = db.collection("listingPrivate")
     batch = db.batch()
@@ -111,16 +116,13 @@ def migrate_verification_documents(db, apply: bool = False, asset_migrator=None)
     scanned = 0
     migrated = 0
     would_migrate = 0
+    would_mark_public_safe = 0
+    marked_public_safe = 0
+    legacy_public_urls_pending = 0
     skipped = 0
     errors = 0
     now = datetime.now(timezone.utc)
     cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "")
-    if apply and asset_migrator is None:
-        api_key = os.getenv("CLOUDINARY_API_KEY", "")
-        api_secret = os.getenv("CLOUDINARY_API_SECRET", "")
-        if not cloud_name or not api_key or not api_secret:
-            raise RuntimeError("CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET are required with --apply.")
-        asset_migrator = lambda asset: rename_cloudinary_asset(asset, cloud_name, api_key, api_secret)
 
     for listing_snapshot in listings.stream():
         scanned += 1
@@ -130,12 +132,29 @@ def migrate_verification_documents(db, apply: bool = False, asset_migrator=None)
         if not isinstance(owner_id, str) or not owner_id:
             skipped += 1
             continue
+        if mark_safe_only:
+            if legacy_fields:
+                legacy_public_urls_pending += 1
+                continue
+            if listing.get("publicDataSafe") is True:
+                continue
+            if apply:
+                batch.update(listing_snapshot.reference, {"publicDataSafe": True})
+                pending_writes += 1
+                marked_public_safe += 1
+                if pending_writes >= BATCH_WRITE_LIMIT:
+                    batch.commit()
+                    batch = db.batch()
+                    pending_writes = 0
+            else:
+                would_mark_public_safe += 1
+            continue
 
         private_ref = private_listings.document(listing_snapshot.id)
         private_snapshot = private_ref.get()
         private_data = private_snapshot.to_dict() or {}
         private_legacy_fields = [field for field in ("ownershipDocumentUrl", "governmentIdUrl") if field in private_data]
-        if not legacy_fields and not private_legacy_fields:
+        if not legacy_fields and not private_legacy_fields and listing.get("publicDataSafe") is True:
             continue
         if private_snapshot.exists and private_data.get("ownerId") != owner_id:
             skipped += 1
@@ -171,7 +190,21 @@ def migrate_verification_documents(db, apply: bool = False, asset_migrator=None)
                     continue
                 if not apply:
                     would_migrate += 1
+                    if source == "listing":
+                        listing_fields_to_delete.add(field)
                     continue
+                if asset_migrator is None:
+                    api_key = os.getenv("CLOUDINARY_API_KEY", "")
+                    api_secret = os.getenv("CLOUDINARY_API_SECRET", "")
+                    if not cloud_name or not api_key or not api_secret:
+                        errors += 1
+                        continue
+                    asset_migrator = lambda current_asset: rename_cloudinary_asset(
+                        current_asset,
+                        cloud_name,
+                        api_key,
+                        api_secret,
+                    )
                 try:
                     asset_migrator(asset)
                 except Exception:
@@ -195,17 +228,28 @@ def migrate_verification_documents(db, apply: bool = False, asset_migrator=None)
                     "resourceType": asset["resourceType"],
                 }
 
-        if not apply or not changed:
+        public_listing_safe = not legacy_fields or set(legacy_fields).issubset(listing_fields_to_delete)
+        if not apply:
+            if public_listing_safe and listing.get("publicDataSafe") is not True:
+                would_mark_public_safe += 1
             continue
 
-        private_update = {"ownerId": owner_id, "documents": document_assets, "updatedAt": now}
-        private_update.update({field: firestore.DELETE_FIELD for field in private_fields_to_delete})
-        batch.set(private_ref, private_update, merge=True)
+        if not changed and not public_listing_safe:
+            continue
+
+        if changed:
+            private_update = {"ownerId": owner_id, "documents": document_assets, "updatedAt": now}
+            private_update.update({field: firestore.DELETE_FIELD for field in private_fields_to_delete})
+            batch.set(private_ref, private_update, merge=True)
+            pending_writes += 1
+
         listing_update = {field: firestore.DELETE_FIELD for field in listing_fields_to_delete}
+        if public_listing_safe and listing.get("publicDataSafe") is not True:
+            listing_update["publicDataSafe"] = True
+            marked_public_safe += 1
         if listing_update:
             batch.update(listing_snapshot.reference, listing_update)
             pending_writes += 1
-        pending_writes += 1
         if pending_writes >= BATCH_WRITE_LIMIT:
             batch.commit()
             batch = db.batch()
@@ -218,6 +262,9 @@ def migrate_verification_documents(db, apply: bool = False, asset_migrator=None)
         "scanned": scanned,
         "migrated": migrated,
         "would_migrate": would_migrate,
+        "marked_public_safe": marked_public_safe,
+        "would_mark_public_safe": would_mark_public_safe,
+        "legacy_public_urls_pending": legacy_public_urls_pending,
         "skipped": skipped,
         "errors": errors,
         "applied": int(apply),
@@ -227,11 +274,21 @@ def migrate_verification_documents(db, apply: bool = False, asset_migrator=None)
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="write changes; without this flag only report a dry run")
+    parser.add_argument(
+        "--mark-safe-only",
+        action="store_true",
+        help="mark only listings with no legacy public verification URL fields; do not touch Cloudinary or private documents",
+    )
     args = parser.parse_args()
 
-    result = migrate_verification_documents(get_db(), apply=args.apply)
+    result = migrate_verification_documents(get_db(), apply=args.apply, mark_safe_only=args.mark_safe_only)
     mode = "Applied" if args.apply else "Dry run"
-    print(f"{mode}: scanned={result['scanned']} migrated={result['migrated']} would_migrate={result['would_migrate']} skipped={result['skipped']} errors={result['errors']}")
+    print(
+        f"{mode}: scanned={result['scanned']} migrated={result['migrated']} "
+        f"would_migrate={result['would_migrate']} marked_public_safe={result['marked_public_safe']} "
+        f"would_mark_public_safe={result['would_mark_public_safe']} skipped={result['skipped']} "
+        f"legacy_public_urls_pending={result['legacy_public_urls_pending']} errors={result['errors']}"
+    )
     if result["skipped"]:
         print("Listings with missing owners or conflicting private records need manual review.")
 

@@ -5,6 +5,7 @@ const { initializeApp } = require("firebase-admin/app");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
 const { dateToMillis, hasConfirmedOverlap } = require("./booking");
+const { canReadSecureDocument } = require("./secureDocumentAccess");
 
 initializeApp();
 setGlobalOptions({ region: "asia-southeast1", maxInstances: 1 });
@@ -21,12 +22,8 @@ exports.getSecureDocumentUrl = onCall({ region: "asia-southeast1" }, async (requ
     throw new HttpsError("invalid-argument", "A storage path is required.");
   }
 
-  const [userSnapshot, isOwnerPath] = await Promise.all([
-    db.collection("users").doc(userId).get(),
-    Promise.resolve(path.startsWith(`verification/${userId}/`)),
-  ]);
-  const isAdmin = userSnapshot.exists && userSnapshot.data()?.role === "admin";
-  if (!isOwnerPath && !isAdmin) {
+  const userSnapshot = await db.collection("users").doc(userId).get();
+  if (!canReadSecureDocument(userId, userSnapshot.exists ? userSnapshot.data() : null, path)) {
     throw new HttpsError("permission-denied", "You do not have access to this document.");
   }
 

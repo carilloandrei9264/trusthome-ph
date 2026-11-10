@@ -115,7 +115,25 @@ command. Never test a restore against the live project.
 The migration at `migrate_verification_documents.py` is dry-run by default. Before
 applying it, take and verify a Firestore JSON backup. Review the dry-run counts and
 confirm the Cloudinary cloud name matches the project. The dry run does not print
-document URLs.
+document URLs. Public listing queries and Firestore rules require the
+`publicDataSafe` marker; older listings stay hidden from public reads until they
+are reviewed and marked safe.
+
+To mark only records that have no legacy public verification URL fields, without
+touching Cloudinary assets or private documents, review a dry run first:
+
+```bash
+python migrate_verification_documents.py --mark-safe-only
+```
+
+After reviewing the counts and taking a backup, apply the marker updates:
+
+```bash
+python migrate_verification_documents.py --apply --mark-safe-only
+```
+
+Records with legacy public URLs remain hidden for manual or fully approved
+migration; the command reports how many such records remain.
 
 Applying the migration also requires `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`,
 and `CLOUDINARY_API_SECRET` in the trusted machine's environment, plus the Firestore

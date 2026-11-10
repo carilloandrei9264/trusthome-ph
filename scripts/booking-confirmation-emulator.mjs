@@ -32,6 +32,7 @@ try {
       ownerId,
       title: "Synthetic listing",
       verificationStatus: "verified",
+      publicDataSafe: true,
     });
     await setDoc(doc(adminDb, "listingPrivate", "listing-1"), { ownerId, address: privateAddress });
 

@@ -34,6 +34,10 @@ service cloud.firestore {
       return !data.keys().hasAny(['verificationDocUrl', 'ownershipDocumentUrl', 'governmentIdUrl']);
     }
 
+    function isSafePublicListing(data) {
+      return data.publicDataSafe == true && hasNoPublicVerificationUrls(data);
+    }
+
     function hasSafePublicOwnerName(data) {
       return !data.keys().hasAny(['ownerName'])
         || (data.ownerName is string && !data.ownerName.matches('.*@.*'));
@@ -165,13 +169,16 @@ service cloud.firestore {
     // Public users can read verified listings. Owners can read their own
     // listings, including pending and rejected submissions.
     match /listings/{listingId} {
-      allow read: if resource.data.verificationStatus == 'verified'
+      // The marker makes public-list queries exclude legacy records until they are reviewed.
+      allow read: if (resource.data.verificationStatus == 'verified'
+          && isSafePublicListing(resource.data))
         || isOwner(resource.data.ownerId)
         || isAdmin();
 
       allow create: if isActiveUser()
         && request.resource.data.ownerId == request.auth.uid
         && request.resource.data.verificationStatus == 'pending'
+        && isSafePublicListing(request.resource.data)
         && !request.resource.data.keys().hasAny(['address'])
         && hasValidListingCore(request.resource.data)
         && hasSafePublicOwnerName(request.resource.data)
@@ -182,10 +189,13 @@ service cloud.firestore {
 
       // Admins control verification fields. Owners may edit their own listing
       // fields and resubmit rejected listings, but cannot self-approve them.
-      allow update: if isAdmin()
+      allow update: if (isAdmin()
+          && isSafePublicListing(request.resource.data)
+          && request.resource.data.publicDataSafe == resource.data.publicDataSafe)
         || (isActiveUser()
           && isOwner(resource.data.ownerId)
           && request.resource.data.ownerId == resource.data.ownerId
+          && isSafePublicListing(request.resource.data)
           && hasValidListingCore(request.resource.data)
           && hasSafePublicOwnerName(request.resource.data)
           && hasValidListingPurpose(request.resource.data)

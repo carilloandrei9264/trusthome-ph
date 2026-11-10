@@ -167,6 +167,7 @@ export default function CreateListing() {
         amenities: form.amenities,
         showingWindows: form.showingWindows,
         verificationStatus: "pending",
+        publicDataSafe: true,
         photoUrls,
         createdAt: serverTimestamp(),
       });

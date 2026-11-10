@@ -147,6 +147,7 @@ export default function Browse() {
       const baseQuery = query(
         collection(db, "listings"),
         where("verificationStatus", "==", "verified"),
+        where("publicDataSafe", "==", true),
         orderBy("createdAt", "desc"),
         limit(LISTINGS_PER_PAGE)
       );

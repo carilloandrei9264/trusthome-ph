@@ -110,6 +110,7 @@ class MigrateVerificationDocumentsTests(unittest.TestCase):
         self.assertEqual(result["migrated"], 0)
         self.assertEqual(result["would_migrate"], 1)
         self.assertIn("verificationDocUrl", database.documents["listings"]["listing-1"])
+        self.assertNotIn("publicDataSafe", database.documents["listings"]["listing-1"])
         self.assertEqual(database.documents["listingPrivate"], {})
 
     def test_apply_moves_urls_and_is_idempotent(self):
@@ -128,6 +129,7 @@ class MigrateVerificationDocumentsTests(unittest.TestCase):
         self.assertEqual(second_result["migrated"], 0)
         self.assertNotIn("ownershipDocumentUrl", database.documents["listings"]["listing-1"])
         self.assertNotIn("governmentIdUrl", database.documents["listings"]["listing-1"])
+        self.assertTrue(database.documents["listings"]["listing-1"]["publicDataSafe"])
         self.assertTrue(database.documents["listingPrivate"]["listing-1"]["documents"]["ownership"]["publicId"].startswith(
             "trusthome_private_listing-1_ownership_"))
         self.assertEqual(database.documents["listingPrivate"]["listing-1"]["documents"]["ownership"]["format"], "png")
@@ -201,6 +203,59 @@ class MigrateVerificationDocumentsTests(unittest.TestCase):
         self.assertEqual(result["skipped"], 1)
         self.assertIn("ownershipDocumentUrl", database.documents["listings"]["listing-1"])
         self.assertEqual(database.documents["listingPrivate"]["listing-1"]["ownerId"], "owner-2")
+
+    def test_apply_marks_listings_without_public_document_urls_safe(self):
+        database = FakeDatabase({
+            "listing-1": {"ownerId": "owner-1"},
+            "listing-2": {"ownerId": "owner-2", "publicDataSafe": True},
+        })
+
+        dry_run = migrate_verification_documents(database)
+        self.assertEqual(dry_run["would_mark_public_safe"], 1)
+        self.assertNotIn("publicDataSafe", database.documents["listings"]["listing-1"])
+
+        result = migrate_verification_documents(database, apply=True, asset_migrator=self.asset_migrator)
+
+        self.assertEqual(result["marked_public_safe"], 1)
+        self.assertTrue(database.documents["listings"]["listing-1"]["publicDataSafe"])
+
+    def test_mark_safe_only_leaves_legacy_public_urls_unchanged(self):
+        database = FakeDatabase({
+            "listing-1": {
+                "ownerId": "owner-1",
+                "ownershipDocumentUrl": "https://res.cloudinary.com/demo/image/upload/v123/trusthome/listings/listing-1/ownership.png",
+            },
+            "listing-2": {"ownerId": "owner-2"},
+        })
+
+        dry_run = migrate_verification_documents(database, mark_safe_only=True)
+        self.assertEqual(dry_run["would_mark_public_safe"], 1)
+        self.assertEqual(dry_run["legacy_public_urls_pending"], 1)
+        self.assertNotIn("publicDataSafe", database.documents["listings"]["listing-2"])
+
+        result = migrate_verification_documents(database, apply=True, mark_safe_only=True)
+
+        self.assertEqual(result["marked_public_safe"], 1)
+        self.assertEqual(result["legacy_public_urls_pending"], 1)
+        self.assertNotIn("publicDataSafe", database.documents["listings"]["listing-1"])
+        self.assertIn("ownershipDocumentUrl", database.documents["listings"]["listing-1"])
+        self.assertTrue(database.documents["listings"]["listing-2"]["publicDataSafe"])
+
+    def test_failed_public_asset_migration_does_not_mark_listing_safe(self):
+        def fail_migration(_asset):
+            raise RuntimeError("asset conversion failed")
+
+        database = FakeDatabase({
+            "listing-1": {
+                "ownerId": "owner-1",
+                "ownershipDocumentUrl": "https://res.cloudinary.com/demo/image/upload/v123/trusthome/listings/listing-1/ownership.png",
+            },
+        })
+
+        result = migrate_verification_documents(database, apply=True, asset_migrator=fail_migration)
+
+        self.assertEqual(result["errors"], 1)
+        self.assertNotIn("publicDataSafe", database.documents["listings"]["listing-1"])
 
     def test_cloudinary_url_parser_handles_versions_folders_and_cloud_allowlist(self):
         asset = parse_cloudinary_asset_url(

@@ -19,7 +19,12 @@ export default function PublicProfile() {
     Promise.all([
       getDoc(doc(db, "publicProfiles", userId)),
       getDoc(doc(db, "publicAccountability", userId)),
-      getDocs(query(collection(db, "listings"), where("ownerId", "==", userId), where("verificationStatus", "==", "verified"))),
+      getDocs(query(
+        collection(db, "listings"),
+        where("ownerId", "==", userId),
+        where("verificationStatus", "==", "verified"),
+        where("publicDataSafe", "==", true),
+      )),
       getDocs(query(collection(db, "ratings"), where("ownerId", "==", userId))),
     ]).then(([profileSnapshot, accountabilitySnapshot, listings, ownerRatings]) => {
       setProfile(profileSnapshot.exists() ? profileSnapshot.data() : null);

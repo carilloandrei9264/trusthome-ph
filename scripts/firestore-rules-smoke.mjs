@@ -24,6 +24,7 @@ before(async () => {
       ownerId: "owner-1",
       title: "Synthetic verified listing",
       verificationStatus: "verified",
+      publicDataSafe: true,
       listingPurpose: "rent",
       rentalTerm: "long_term",
       price: 12000,
@@ -33,6 +34,7 @@ before(async () => {
       ownerId: "owner-1",
       title: "Synthetic sale listing",
       verificationStatus: "verified",
+      publicDataSafe: true,
       listingPurpose: "sale",
       rentalTerm: null,
       price: 1000000,
@@ -80,6 +82,7 @@ test("verification URLs stay private while verified listing details remain publi
     bathrooms: 1,
     photoUrls: ["photo-1", "photo-2", "photo-3", "photo-4"],
     verificationStatus: "pending",
+    publicDataSafe: true,
     listingPurpose: "rent",
     rentalTerm: "long_term",
     mapLocation: null,
@@ -103,6 +106,31 @@ test("verification URLs stay private while verified listing details remain publi
   assert.equal(publicListing.data().verificationDocUrl, undefined);
 });
 
+test("legacy verified listings with verification URLs are not publicly readable", async () => {
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), "listings", "legacy-verified-1"), {
+      ownerId: "owner-1",
+      title: "Synthetic legacy listing",
+      verificationStatus: "verified",
+      ownershipDocumentUrl: "https://example.test/ownership.png",
+    });
+  });
+
+  const publicDb = testEnvironment.unauthenticatedContext().firestore();
+  const ownerDb = testEnvironment.authenticatedContext("owner-1").firestore();
+  const adminDb = testEnvironment.authenticatedContext("admin-1").firestore();
+
+  await assertFails(getDoc(doc(publicDb, "listings", "legacy-verified-1")));
+  await assertSucceeds(getDoc(doc(ownerDb, "listings", "legacy-verified-1")));
+  await assertSucceeds(getDoc(doc(adminDb, "listings", "legacy-verified-1")));
+  const publicListings = await assertSucceeds(getDocs(query(
+    collection(publicDb, "listings"),
+    where("verificationStatus", "==", "verified"),
+    where("publicDataSafe", "==", true),
+  )));
+  assert.equal(publicListings.docs.some((listing) => listing.id === "legacy-verified-1"), false);
+});
+
 test("owners can set supported optional condition and furnishing details", async () => {
   await testEnvironment.withSecurityRulesDisabled(async (context) => {
     await setDoc(doc(context.firestore(), "listings", "details-listing"), {
@@ -115,6 +143,7 @@ test("owners can set supported optional condition and furnishing details", async
       bathrooms: 1,
       photoUrls: ["photo-1", "photo-2", "photo-3", "photo-4"],
       verificationStatus: "pending",
+      publicDataSafe: true,
       listingPurpose: "rent",
       rentalTerm: "long_term",
       mapLocation: null,
@@ -133,20 +162,26 @@ test("owners can set supported optional condition and furnishing details", async
 
 test("owners cannot create or add verification URLs on public listings", async () => {
   const ownerDb = testEnvironment.authenticatedContext("owner-1").firestore();
+  const adminDb = testEnvironment.authenticatedContext("admin-1").firestore();
 
   await assertFails(setDoc(doc(ownerDb, "listings", "public-url-create"), {
     ownerId: "owner-1",
     title: "Synthetic listing",
     verificationStatus: "pending",
+    publicDataSafe: true,
     ownershipDocumentUrl: "https://example.test/ownership.png",
   }));
 
   await assertFails(updateDoc(doc(ownerDb, "listings", "new-1"), {
     ownershipDocumentUrl: "https://example.test/ownership.png",
   }));
+
+  await assertFails(updateDoc(doc(adminDb, "listings", "verified-1"), {
+    ownershipDocumentUrl: "https://example.test/ownership.png",
+  }));
 });
 
-test("owners can remove legacy public verification URL fields", async () => {
+test("owners and admins cannot mark legacy verification URLs safe from the client", async () => {
   await testEnvironment.withSecurityRulesDisabled(async (context) => {
     await setDoc(doc(context.firestore(), "listings", "legacy-owner-1"), {
       ownerId: "owner-1",
@@ -164,41 +199,21 @@ test("owners can remove legacy public verification URL fields", async () => {
   });
 
   const ownerDb = testEnvironment.authenticatedContext("owner-1").firestore();
-  await assertSucceeds(updateDoc(doc(ownerDb, "listings", "legacy-owner-1"), {
+  const adminDb = testEnvironment.authenticatedContext("admin-1").firestore();
+  await assertFails(updateDoc(doc(ownerDb, "listings", "legacy-owner-1"), {
     ownershipDocumentUrl: deleteField(),
     governmentIdUrl: deleteField(),
+    publicDataSafe: true,
   }));
-});
 
-test("admins can move legacy verification URLs to listingPrivate atomically", async () => {
-  await testEnvironment.withSecurityRulesDisabled(async (context) => {
-    await setDoc(doc(context.firestore(), "listings", "legacy-admin-1"), {
-      ownerId: "owner-1",
-      title: "Legacy listing for review",
-      verificationStatus: "pending",
-      ownershipDocumentUrl: "https://example.test/ownership.png",
-      governmentIdUrl: "https://example.test/id.png",
-    });
-  });
-
-  const adminDb = testEnvironment.authenticatedContext("admin-1").firestore();
   const batch = writeBatch(adminDb);
-  batch.update(doc(adminDb, "listings", "legacy-admin-1"), {
+  batch.update(doc(adminDb, "listings", "legacy-owner-1"), {
     ownershipDocumentUrl: deleteField(),
     governmentIdUrl: deleteField(),
     verificationDocUrl: deleteField(),
+    publicDataSafe: true,
   });
-  batch.set(doc(adminDb, "listingPrivate", "legacy-admin-1"), {
-    ownerId: "owner-1",
-    ownershipDocumentUrl: "https://example.test/ownership.png",
-    governmentIdUrl: "https://example.test/id.png",
-    updatedAt: new Date(),
-  }, { merge: true });
-
-  await assertSucceeds(batch.commit());
-  const privateRecord = await assertSucceeds(getDoc(doc(adminDb, "listingPrivate", "legacy-admin-1")));
-  assert.equal(privateRecord.data().ownershipDocumentUrl, "https://example.test/ownership.png");
-  assert.equal(privateRecord.data().governmentIdUrl, "https://example.test/id.png");
+  await assertFails(batch.commit());
 });
 
 test("owners must advance the listing lock in the same transaction to confirm", async () => {
@@ -495,6 +510,7 @@ test("a pending listing can atomically notify admins for review", async () => {
     bathrooms: 1,
     photoUrls: ["photo-1", "photo-2", "photo-3", "photo-4"],
     verificationStatus: "pending",
+    publicDataSafe: true,
     listingPurpose: "rent",
     rentalTerm: "long_term",
     mapLocation: null,

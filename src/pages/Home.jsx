@@ -105,6 +105,7 @@ export default function Home() {
         query(
           collection(db, "listings"),
           where("verificationStatus", "==", "verified"),
+          where("publicDataSafe", "==", true),
           orderBy("createdAt", "desc"),
           limit(6)
         )

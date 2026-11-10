@@ -64,6 +64,7 @@ def build_listing(listing_id, owner_id, title, city, property_type, price, floor
         "floorArea": floor_area,
         "lotArea": floor_area + 20,
         "verificationStatus": status,
+        "publicDataSafe": True,
         "photoUrls": [DEMO_IMAGE.replace("Property", listing_id)],
         "createdAt": NOW - timedelta(days=30 - int(listing_id[-2:])),
         "updatedAt": NOW,
